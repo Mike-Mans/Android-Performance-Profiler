@@ -1,0 +1,9 @@
+[server]
+# 0.0.0.0 makes the service reachable from the phone over Wi-Fi.
+# Use 127.0.0.1 to accept local connections only.
+host = "0.0.0.0"
+port = 9095
+
+[adb]
+# Path to the adb executable. Use an absolute path if adb is not on PATH.
+path = "adb"
