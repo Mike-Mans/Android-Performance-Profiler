@@ -7,3 +7,9 @@ port = 9095
 [adb]
 # Path to the adb executable. Use an absolute path if adb is not on PATH.
 path = "adb"
+
+[sessions]
+# Duration used when a request does not give one, in seconds.
+default_duration_s = 30
+# Upper bound for any session. Also acts as the capture timeout.
+max_duration_s = 300
