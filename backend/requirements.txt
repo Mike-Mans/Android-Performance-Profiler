@@ -1,0 +1,13 @@
+# Runtime dependencies. Versions are pinned for reproducible trace analysis.
+# Create the venv with Python 3.13:  python3.13 -m venv .venv
+
+# Web service
+fastapi==0.162.7
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+
+# Perfetto trace parsing (Python bindings for Trace Processor)
+perfetto==0.59.1
+
+# Data processing / CSV and JSON export
+pandas==3.1.1

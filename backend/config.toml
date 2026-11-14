@@ -1,0 +1,15 @@
+[server]
+# 0.0.0.0 makes the service reachable from the phone over Wi-Fi.
+# Use 127.0.0.1 to accept local connections only.
+host = "0.0.0.0"
+port = 9095
+
+[adb]
+# Path to the adb executable. Use an absolute path if adb is not on PATH.
+path = "adb"
+
+[sessions]
+# Duration used when a request does not give one, in seconds.
+default_duration_s = 30
+# Upper bound for any session. Also acts as the capture timeout.
+max_duration_s = 300
