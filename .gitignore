@@ -70,3 +70,8 @@ Testing/
 # Perfetto traces
 traces/
 *.pftrace
+.venv/
+.gradle/
+local.properties
+__pycache__/
+perfetto-src/
