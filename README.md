@@ -19,7 +19,8 @@ process name; it does not assign OS work or isolated processes to the app.
    ```
 
 4. In a second terminal, set JDK 17 and Android SDK with API 34, then run
-   `./gradlew.bat assembleDebug`. To exercise the actual Start button,
+   `./gradlew.bat assembleDebug` from the `app` directory (the Gradle project
+   lives in `app/`). To exercise the actual Start button,
    foreground Calculator, and verify the APK result automatically, run:
 
    ```powershell
