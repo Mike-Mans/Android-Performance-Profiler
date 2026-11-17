@@ -1,7 +1,6 @@
 [server]
-# 0.0.0.0 makes the service reachable from the phone over Wi-Fi.
-# Use 127.0.0.1 to accept local connections only.
-host = "0.0.0.0"
+# USB demo: the phone reaches this loopback service through adb reverse.
+host = "127.0.0.1"
 port = 9095
 
 [adb]

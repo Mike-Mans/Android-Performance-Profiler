@@ -1,6 +1,7 @@
 """Entry point of the profiler backend service."""
 
 import tomllib
+import os
 from pathlib import Path
 
 import uvicorn
@@ -13,6 +14,7 @@ import sessions
 from session_service import (
     InvalidDurationError,
     PackageNotFoundError,
+    ResultsNotReadyError,
     ServiceSettings,
     SessionService,
 )
@@ -27,7 +29,7 @@ def load_config() -> dict:
 
 
 config = load_config()
-ADB_PATH = config.get("adb", {}).get("path", "adb")
+ADB_PATH = os.environ.get("PROFILER_ADB") or config.get("adb", {}).get("path", "adb")
 
 service = SessionService(
     store=sessions.SessionStore(),
@@ -46,6 +48,7 @@ ERROR_STATUS: dict[type[Exception], int] = {
     PackageNotFoundError: 404,
     sessions.DeviceBusyError: 409,
     InvalidDurationError: 422,
+    ResultsNotReadyError: 409,
     adb.InvalidPackageNameError: 422,
     adb.AdbError: 502,
 }
@@ -121,6 +124,11 @@ def list_sessions() -> dict:
 def get_session(session_id: str) -> dict:
     """Return the current state of one session."""
     return service.get(session_id).to_dict()
+
+
+@app.get("/sessions/{session_id}/results")
+def session_results(session_id: str) -> dict:
+    return {"analysis_location": "android_shell", "results": service.get_results(session_id)}
 
 
 if __name__ == "__main__":
