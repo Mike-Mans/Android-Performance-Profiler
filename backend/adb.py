@@ -29,6 +29,12 @@ PACKAGE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$
 TRACE_PATH_RE = re.compile(r"/data/misc/perfetto-traces/[A-Za-z0-9_.-]+\.pftrace")
 PROCESSOR = "/data/local/tmp/pp_week1_trace_processor"
 
+# Wireless debugging: an IPv4 address or "localhost", then a port.
+ADDRESS_RE = re.compile(r"(?P<host>\d{1,3}(?:\.\d{1,3}){3}|localhost):(?P<port>\d{1,5})")
+PAIRING_CODE_RE = re.compile(r"\d{6}")
+# Pairing and connecting talk to the network, so they get a longer timeout.
+WIRELESS_TIMEOUT_S = 20
+
 
 class AdbError(RuntimeError):
     """Raised when adb is missing, times out, or exits with an error."""
@@ -40,6 +46,22 @@ class DeviceNotFoundError(AdbError):
 
 class InvalidPackageNameError(ValueError):
     """Raised when a package name is not a well-formed Android package name."""
+
+
+class InvalidAddressError(ValueError):
+    """Raised when a wireless debugging address is not a valid HOST:PORT."""
+
+
+class InvalidPairingCodeError(ValueError):
+    """Raised when a pairing code is not exactly six digits."""
+
+
+class PairingError(AdbError):
+    """Raised when `adb pair` does not report success."""
+
+
+class ConnectionFailedError(AdbError):
+    """Raised when `adb connect` does not report a connection."""
 
 
 def run_adb(
@@ -253,3 +275,102 @@ def query_trace(serial: str, path: str, sql: str, adb_path: str = "adb") -> str:
             run_adb([*prefix, "rm", "-f", query_path], adb_path)
         except AdbError:
             pass
+
+
+def validate_address(address: str) -> str:
+    """Check that `address` is HOST:PORT with an IPv4 host or "localhost".
+
+    Returns the address unchanged. Raises InvalidAddressError otherwise.
+    """
+    match = ADDRESS_RE.fullmatch(address)
+    if match is None:
+        raise InvalidAddressError(f"invalid address (expected HOST:PORT): {address!r}")
+    host, port = match["host"], int(match["port"])
+    if host != "localhost" and any(int(octet) > 255 for octet in host.split(".")):
+        raise InvalidAddressError(f"invalid IPv4 address: {address!r}")
+    if not 1 <= port <= 65535:
+        raise InvalidAddressError(f"port out of range: {address!r}")
+    return address
+
+
+def validate_pairing_code(code: str) -> str:
+    """Check that `code` is exactly six digits. Returns it unchanged."""
+    if PAIRING_CODE_RE.fullmatch(code) is None:
+        raise InvalidPairingCodeError("pairing code must be exactly six digits")
+    return code
+
+
+def parse_pair_output(output: str) -> str | None:
+    """Return the guid reported by a successful `adb pair`, or None if it did not succeed.
+
+    A successful run prints e.g.
+        Successfully paired to 192.168.0.5:37123 [guid=adb-ABC123-xyz]
+    The guid is returned as an empty string if the line has none.
+    """
+    match = re.search(r"Successfully paired to \S+(?: \[guid=([^\]]*)\])?", output)
+    if match is None:
+        return None
+    return match[1] or ""
+
+
+def parse_connect_output(output: str) -> str | None:
+    """Return the serial reported by a successful `adb connect`, or None on failure.
+
+    `adb connect` exits with status 0 even when it fails, so the text decides:
+        connected to 192.168.0.5:38271           -> success
+        already connected to 192.168.0.5:38271   -> success
+        failed to connect to '...': ...          -> failure
+        cannot connect to ...: ...               -> failure
+    """
+    match = re.search(r"^(?:already )?connected to (\S+)\s*$", output, re.MULTILINE)
+    return match[1] if match else None
+
+
+def pair(address: str, code: str, adb_path: str = "adb") -> str:
+    """Pair this computer with a phone's wireless debugging service.
+
+    `address` is the pairing HOST:PORT shown on the phone's "Pair device with
+    pairing code" screen, and `code` the six-digit code shown with it. Pairing is
+    needed once per computer; it does not create a connection. Returns the guid.
+    Raises InvalidAddressError, InvalidPairingCodeError or PairingError.
+    """
+    validate_address(address)
+    validate_pairing_code(code)
+    try:
+        output = run_adb(["pair", address, code], adb_path, timeout=WIRELESS_TIMEOUT_S)
+    except AdbError as e:
+        raise PairingError(str(e)) from e
+    guid = parse_pair_output(output)
+    if guid is None:
+        raise PairingError(output.strip() or "adb pair reported no result")
+    return guid
+
+
+def connect(address: str, adb_path: str = "adb") -> str:
+    """Connect to a paired phone's wireless debugging port and return its serial.
+
+    `address` is the HOST:PORT shown on the phone's main "Wireless debugging"
+    screen. The returned serial is what the other functions take as `serial`.
+    Raises InvalidAddressError or ConnectionFailedError.
+    """
+    validate_address(address)
+    try:
+        output = run_adb(["connect", address], adb_path, timeout=WIRELESS_TIMEOUT_S)
+    except AdbError as e:
+        raise ConnectionFailedError(str(e)) from e
+    serial = parse_connect_output(output)
+    if serial is None:
+        raise ConnectionFailedError(output.strip() or "adb connect reported no result")
+    return serial
+
+
+def disconnect(address: str, adb_path: str = "adb") -> bool:
+    """Disconnect a wireless device. Returns False if it was not connected."""
+    validate_address(address)
+    try:
+        output = run_adb(["disconnect", address], adb_path)
+    except AdbError as e:
+        if "no such device" in str(e):
+            return False
+        raise
+    return "no such device" not in output
