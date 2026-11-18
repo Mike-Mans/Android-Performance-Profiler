@@ -1,4 +1,4 @@
-# Initial 30-second system trace. CPU frequency/idle events are optional.
+# CPU scheduling and sampled process memory. The bridge supplies duration_ms.
 buffers {
   size_kb: 32768
   fill_policy: RING_BUFFER

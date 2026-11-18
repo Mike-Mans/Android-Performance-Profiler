@@ -21,7 +21,7 @@ import adb
 from sessions import InvalidTransitionError, Session, SessionState, SessionStore
 
 # Base Perfetto config; the service appends the capture duration to it.
-TRACE_CONFIG_PATH = Path(__file__).resolve().parent.parent / "on_device" / "trace.pbtxt"
+TRACE_CONFIG_PATH = Path(__file__).resolve().parent.parent / "on_device" / "cpu_mem.pbtxt"
 CPU_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu.sql")
 TRACE_DIR_ON_DEVICE = "/data/misc/perfetto-traces"
 
