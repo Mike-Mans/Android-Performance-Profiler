@@ -4,12 +4,15 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
@@ -19,6 +22,14 @@ import org.json.JSONObject
 import java.util.Locale
 
 private const val DURATION = 15
+
+private enum class Workload(val label: String, val instructions: String) {
+    IDLE("Idle", "Open the target and leave it untouched until recording ends."),
+    ACTIVE("Active", "Open the target and interact with it until recording ends."),
+}
+
+private fun runKey(serial: String, target: String, workload: Workload): String =
+    "$serial/$target/${workload.name}"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -31,13 +42,17 @@ class MainActivity : ComponentActivity() {
     private fun Profiler() {
         val scope = rememberCoroutineScope()
         var target by rememberSaveable { mutableStateOf("com.google.android.calculator") }
+        var workload by rememberSaveable { mutableStateOf(Workload.IDLE) }
+        var submittedWorkload by rememberSaveable { mutableStateOf(Workload.IDLE) }
+        var runs by rememberSaveable { mutableStateOf(Bundle()) }
         var device by remember { mutableStateOf("Checking USB bridge…") }
         var serial by remember { mutableStateOf<String?>(null) }
         var sessionId by rememberSaveable { mutableStateOf<String?>(null) }
         var starting by remember { mutableStateOf(false) }
         var status by remember { mutableStateOf("Ready") }
         var errorMessage by remember { mutableStateOf<String?>(null) }
-        var result by remember { mutableStateOf<CpuResult?>(null) }
+        var resultCsv by rememberSaveable { mutableStateOf<String?>(null) }
+        val result = remember(resultCsv) { resultCsv?.let(::readCpuSummary) }
         var submittedTarget by rememberSaveable { mutableStateOf("") }
         var refresh by remember { mutableIntStateOf(0) }
 
@@ -69,7 +84,11 @@ class MainActivity : ComponentActivity() {
                         "done" -> {
                             val payload = Api.request("/sessions/$id/results")
                             require(payload.getString("analysis_location") == "android_shell")
-                            result = readCpuSummary(payload.getJSONObject("results").getString("cpu"))
+                            val csv = payload.getJSONObject("results").getString("cpu")
+                            readCpuSummary(csv)
+                            val key = runKey(session.getString("serial"), submittedTarget, submittedWorkload)
+                            runs = Bundle(runs).apply { putString(key, csv) }
+                            resultCsv = csv
                             "Complete"
                         }
                         "failed" -> error(session.optString("error", "Recording failed"))
@@ -84,6 +103,13 @@ class MainActivity : ComponentActivity() {
         }
 
         val busy = starting || sessionId != null
+        val cpuByWorkload = remember(runs, serial, target) {
+            val connected = serial
+            Workload.entries.associateWith { condition ->
+                connected?.let { runs.getString(runKey(it, target.trim(), condition)) }
+                    ?.let(::readCpuSummary)
+            }
+        }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Performance Profiler", style = MaterialTheme.typography.headlineMedium)
@@ -91,15 +117,28 @@ class MainActivity : ComponentActivity() {
             if (serial == null) TextButton(onClick = { refresh++ }) { Text("Reconnect") }
             OutlinedTextField(target, { target = it }, label = { Text("Target package") },
                 enabled = !busy, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Workload.entries.forEach { condition ->
+                    FilterChip(
+                        selected = workload == condition,
+                        onClick = { workload = condition },
+                        label = { Text(condition.label) },
+                        enabled = !busy,
+                    )
+                }
+            }
+            Text(workload.instructions, style = MaterialTheme.typography.bodyMedium)
             Button(enabled = serial != null && !busy && target.isNotBlank(), onClick = {
                 val selected = serial ?: return@Button
                 val requestedTarget = target.trim()
-                starting = true; status = "Starting"; errorMessage = null; result = null
+                val requestedWorkload = workload
+                starting = true; status = "Starting"; errorMessage = null; resultCsv = null
                 scope.launch {
                     try {
                         val response = Api.request("/sessions", JSONObject()
                             .put("serial", selected).put("package", requestedTarget).put("duration_s", DURATION))
                         submittedTarget = requestedTarget
+                        submittedWorkload = requestedWorkload
                         sessionId = response.getString("id")
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) { status = "Failed"; errorMessage = e.message }
@@ -115,10 +154,14 @@ class MainActivity : ComponentActivity() {
             }
             Text(status, style = MaterialTheme.typography.titleLarge)
             errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            if (cpuByWorkload.values.any { it != null }) {
+                CpuComparison(cpuByWorkload)
+            }
             result?.let { cpu ->
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(submittedTarget, style = MaterialTheme.typography.titleMedium)
+                        Text("${submittedWorkload.label} run", style = MaterialTheme.typography.titleMedium)
+                        Text(submittedTarget)
                         if (cpu.slices == 0L) Text("No target CPU activity observed")
                         else {
                             Text(String.format(Locale.US, "%.9f CPU seconds", cpu.ns / 1e9),
@@ -134,3 +177,42 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+@Composable
+private fun CpuComparison(results: Map<Workload, CpuResult?>) {
+    val idle = results[Workload.IDLE]
+    val active = results[Workload.ACTIVE]
+    val maxNs = maxOf(idle?.ns ?: 0L, active?.ns ?: 0L, 1L)
+    val colors = MaterialTheme.colorScheme
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("CPU time by workload", style = MaterialTheme.typography.titleMedium)
+            Workload.entries.forEach { workload ->
+                val cpu = results[workload]
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(workload.label)
+                    Text(cpu?.let { formatCpuTime(it.ns) } ?: "Awaiting run")
+                }
+                if (cpu != null) {
+                    val shape = RoundedCornerShape(4.dp)
+                    val barColor = if (workload == Workload.IDLE) colors.secondary else colors.primary
+                    Box(Modifier.fillMaxWidth().height(12.dp).background(colors.surfaceVariant, shape)) {
+                        Box(Modifier.fillMaxWidth((cpu.ns.toDouble() / maxNs).toFloat())
+                            .fillMaxHeight().background(barColor, shape))
+                    }
+                }
+            }
+            if (idle != null && active != null) {
+                val delta = String.format(Locale.US, "%+.6f CPU s", (active.ns - idle.ns) / 1e9)
+                Text("Active minus idle: $delta", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+private fun formatCpuTime(ns: Long): String = String.format(Locale.US, "%.6f CPU s", ns / 1e9)
