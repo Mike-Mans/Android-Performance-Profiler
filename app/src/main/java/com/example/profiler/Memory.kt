@@ -14,7 +14,8 @@ internal data class ProcessPss(val pid: String, val name: String, val pssKib: Lo
 /** One meminfo sample, placed on the trace timeline (ns since the trace start). */
 internal data class PssSample(val offsetNs: Long, val processes: List<ProcessPss>)
 
-internal data class PssSeries(val samples: List<PssSample>, val unreadable: Int)
+/** `estimated`: samples without a usable dumpsys timestamp, placed by the bridge's clock readings. */
+internal data class PssSeries(val samples: List<PssSample>, val unreadable: Int, val estimated: Int)
 
 private data class ProcessKey(val pid: String, val name: String)
 
@@ -23,6 +24,15 @@ private val MEMINFO_SECTION =
 private val TOTAL_PSS = Regex("""^\s*TOTAL PSS:\s*(\d+)\b""", RegexOption.MULTILINE)
 private val SUMMARY_TOTAL = Regex("""^\s*TOTAL:\s*(\d+)\b""", RegexOption.MULTILINE)
 private val NO_PROCESS = Regex("""^No process found for:""", RegexOption.MULTILINE)
+// Header printed when dumpsys starts collecting. Realtime is elapsedRealtime() in ms,
+// i.e. CLOCK_BOOTTIME like the trace; Uptime excludes deep sleep and is not used.
+private val DUMP_REALTIME = Regex("""^Uptime:\s*\d+\s+Realtime:\s*(\d+)""", RegexOption.MULTILINE)
+// Slack for comparing the ms-precision Realtime with the 10 ms-precision /proc/uptime readings.
+private const val CLOCK_TOLERANCE_NS = 20_000_000L
+
+/** When dumpsys started collecting, in ns of CLOCK_BOOTTIME, or null if the header is missing. */
+internal fun parseDumpRealtimeNs(stdout: String): Long? =
+    DUMP_REALTIME.find(stdout)?.groupValues?.get(1)?.toLongOrNull()?.times(1_000_000)
 
 /**
  * Per-process PSS (KiB) from the stdout of `dumpsys meminfo -s --package <pkg>`.
@@ -44,26 +54,36 @@ internal fun parseMeminfo(stdout: String): List<ProcessPss>? {
 }
 
 /**
- * Parse the payload of GET /sessions/{id}/meminfo. Each sample is placed at the
- * midpoint of its two device clock readings, minus the trace start; both are on
- * CLOCK_BOOTTIME. Returns null if the payload has no sample list.
+ * Parse the payload of GET /sessions/{id}/meminfo and place each sample on the
+ * trace timeline (ns since traceStartNs; everything is on CLOCK_BOOTTIME).
+ *
+ * A sample is placed at the "Realtime:" time dumpsys itself reports. The bridge's
+ * clock readings taken just before and after dumpsys are used to check it, and
+ * their midpoint stands in when the header is missing or disagrees with them.
+ * Returns null if the payload has no sample list.
  */
 internal fun readPssSeries(payload: JSONObject, traceStartNs: Long): PssSeries? {
     val array = payload.optJSONArray("samples") ?: return null
     val samples = mutableListOf<PssSample>()
     var unreadable = 0
+    var estimated = 0
     for (index in 0 until array.length()) {
         val sample = array.optJSONObject(index)
-        val processes = sample?.takeUnless { it.isNull("stdout") }?.let { parseMeminfo(it.getString("stdout")) }
+        val stdout = sample?.takeUnless { it.isNull("stdout") }?.getString("stdout")
+        val processes = stdout?.let(::parseMeminfo)
         val start = sample?.optLong("boottime_start_ns", -1L) ?: -1L
         val end = sample?.optLong("boottime_end_ns", -1L) ?: -1L
         if (processes == null || start < 0 || end < start) {
             unreadable++
             continue
         }
-        samples += PssSample(start + (end - start) / 2 - traceStartNs, processes)
+        val reported = stdout?.let(::parseDumpRealtimeNs)
+            ?.takeIf { it in (start - CLOCK_TOLERANCE_NS)..(end + CLOCK_TOLERANCE_NS) }
+        if (reported == null) estimated++
+        val measuredAt = reported ?: (start + (end - start) / 2)
+        samples += PssSample(measuredAt - traceStartNs, processes)
     }
-    return PssSeries(samples, unreadable)
+    return PssSeries(samples, unreadable, estimated)
 }
 
 /**
@@ -113,6 +133,9 @@ internal fun MemoryTimeline(
             pss.samples.isEmpty() && pss.unreadable == 0 -> Text("PSS · no samples taken")
         }
         if (pss != null && pss.unreadable > 0) Text("PSS · ${pss.unreadable} samples could not be read")
+        if (pss != null && pss.estimated > 0) {
+            Text("PSS · ${pss.estimated} samples had no dumpsys timestamp; placed by adb timing")
+        }
         if (outsideWindow > 0) Text("PSS · $outsideWindow samples fell outside the trace window")
 
         val processes = (rssPoints.keys + pssPoints.keys).sortedWith(compareBy({ it.name }, { it.pid }))
