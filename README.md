@@ -56,6 +56,7 @@ Main endpoints:
 | `POST /devices/connect` | Connect to a phone over wireless debugging, pairing first if asked |
 | `GET /packages?serial=...` | List installed packages and their UIDs on one device |
 | `POST /sessions` | Start a profiling run; returns a session id immediately |
+| `POST /sessions/{id}/stop` | End a capture early; what was recorded so far is analyzed as usual |
 | `GET /sessions/{id}` | State of one session (pending, capturing, analyzing, done, failed) |
 | `GET /sessions/{id}/results` | Result tables of a finished session |
 | `GET /sessions/{id}/meminfo` | `dumpsys meminfo` samples taken during the capture, with device boot-time timestamps that match the trace |

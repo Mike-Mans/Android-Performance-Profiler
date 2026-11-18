@@ -1,4 +1,8 @@
 # CPU scheduling and sampled process memory. The bridge supplies duration_ms.
+# Stream to the output file while recording, so a long session (up to the
+# bridge's max_duration_s) never overwrites its start in the ring buffers.
+write_into_file: true
+file_write_period_ms: 2500
 buffers {
   size_kb: 32768
   fill_policy: RING_BUFFER

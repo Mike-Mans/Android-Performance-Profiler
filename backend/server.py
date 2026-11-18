@@ -177,6 +177,13 @@ def get_session(session_id: str) -> dict:
     return service.get(session_id).to_dict()
 
 
+@app.post("/sessions/{session_id}/stop")
+def stop_session(session_id: str) -> dict:
+    """End a capture early. The trace recorded so far is finalized and analyzed as
+    usual. Idempotent; returns the session without waiting for it to finish."""
+    return service.stop(session_id).to_dict()
+
+
 @app.get("/sessions/{session_id}/results")
 def session_results(session_id: str) -> dict:
     return {"analysis_location": "android_shell", "results": service.get_results(session_id)}

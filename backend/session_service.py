@@ -157,7 +157,13 @@ class SessionService:
         state is returned unchanged. Does not wait for the trace to be finalized.
         Raises SessionNotFoundError if the id is unknown.
         """
-        raise NotImplementedError
+        session = self._store.get(session_id)
+        stop_event = self._stop_events.get(session_id)
+        # Only a session that has not started finalizing can be stopped early; a
+        # pending one stops as soon as its capture has started.
+        if stop_event is not None and session.state in (SessionState.PENDING, SessionState.CAPTURING):
+            stop_event.set()
+        return session
 
     def get(self, session_id: str) -> Session:
         """Return the current state of one session."""
@@ -265,6 +271,12 @@ class SessionService:
             deadline = time.monotonic() + request.duration_s
             while (remaining := deadline - time.monotonic()) > 0:
                 if stop_event.wait(min(POLL_INTERVAL_S, remaining)):
+                    # Stopped early: SIGINT makes Perfetto finalize the trace now.
+                    self._store.transition(session_id, SessionState.STOPPING)
+                    try:
+                        adb.interrupt_perfetto(serial, pid, self._adb_path)
+                    except adb.AdbError:
+                        pass  # it may have just exited on its own; checked below
                     break
                 if not adb.is_perfetto_running(serial, pid, self._adb_path):
                     break
@@ -343,7 +355,3 @@ class SessionService:
         except InvalidTransitionError:
             pass
 
-    # Not implemented yet:
-    #   stop()    -> set the session's stop event; the capture loop then moves the
-    #                session to STOPPING and interrupts Perfetto immediately
-    #                instead of waiting for its duration to elapse.

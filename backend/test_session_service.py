@@ -1,3 +1,5 @@
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -52,3 +54,38 @@ class PhoneResultTests(unittest.TestCase):
         self.assertEqual(self.service.get(self.session.id).state, SessionState.FAILED)
         with self.assertRaises(ResultsNotReadyError):
             self.service.get_results(self.session.id)
+
+
+class StopTests(unittest.TestCase):
+    def setUp(self):
+        self.store = SessionStore()
+        self.service = SessionService(self.store, "adb", ServiceSettings(15, 30))
+        # No package: the meminfo sampler is not started.
+        self.request = StartRequest("device", 30, None, None)
+        self.session = self.store.create("device", 30)
+
+    def test_stop_interrupts_perfetto_and_keeps_the_trace(self):
+        stop_event = threading.Event()
+        self.service._stop_events[self.session.id] = stop_event
+        running = {"value": True}
+        with (
+            patch("adb.start_perfetto", return_value=77),
+            patch("adb.is_perfetto_running", side_effect=lambda *a: running["value"]),
+            patch("adb.interrupt_perfetto", side_effect=lambda *a: running.update(value=False)) as interrupt,
+            patch("adb.trace_file_size", return_value=1024),
+        ):
+            threading.Timer(0.05, lambda: self.service.stop(self.session.id)).start()
+            started = time.monotonic()
+            path = self.service._capture(self.session.id, self.request, stop_event)
+
+        self.assertLess(time.monotonic() - started, 5)  # well before the 30 s duration
+        interrupt.assert_called_once_with("device", 77, "adb")
+        self.assertEqual(self.service.get(self.session.id).state, SessionState.STOPPING)
+        self.assertTrue(path.endswith(f"{self.session.id}.pftrace"))
+
+    def test_stop_of_a_finished_session_changes_nothing(self):
+        stop_event = threading.Event()
+        self.service._stop_events[self.session.id] = stop_event
+        self.store.transition(self.session.id, SessionState.FAILED, error="x")
+        self.assertEqual(self.service.stop(self.session.id).state, SessionState.FAILED)
+        self.assertFalse(stop_event.is_set())

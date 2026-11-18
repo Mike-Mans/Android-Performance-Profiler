@@ -1,6 +1,7 @@
 package com.example.profiler
 
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -19,9 +20,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.net.URLEncoder
 import java.util.Locale
 
-private const val DURATION = 15
+// Recording runs until the user stops it, or at most this long.
+private const val MAX_DURATION_S = 120
+// Extra time allowed after recording for the phone to finalize and analyze the trace.
+private const val ANALYSIS_TIMEOUT_MS = 120_000L
 
 private enum class Workload(val label: String, val instructions: String) {
     IDLE("Idle", "Open the target and leave it untouched until recording ends."),
@@ -58,6 +63,12 @@ class MainActivity : ComponentActivity() {
         val result = remember(resultCsv) { resultCsv?.let(::readCpuSummary) }
         var submittedTarget by rememberSaveable { mutableStateOf("") }
         var refresh by remember { mutableIntStateOf(0) }
+        var packages by remember { mutableStateOf<List<InstalledPackage>?>(null) }
+        var packagesError by remember { mutableStateOf<String?>(null) }
+        var packagesReload by remember { mutableIntStateOf(0) }
+        var stopRequested by remember { mutableStateOf(false) }
+        var recordingStartedAt by remember { mutableStateOf<Long?>(null) }
+        var recordingSeconds by remember { mutableIntStateOf(0) }
 
         LaunchedEffect(refresh) {
             try {
@@ -75,14 +86,32 @@ class MainActivity : ComponentActivity() {
             catch (_: Exception) { serial = null; device = "USB bridge unavailable" }
         }
 
+        // Installed packages of the connected device, for the target picker.
+        LaunchedEffect(serial, packagesReload) {
+            packages = null
+            packagesError = null
+            val selected = serial ?: return@LaunchedEffect
+            try {
+                packages = readPackages(Api.request("/packages?serial=" + URLEncoder.encode(selected, "UTF-8")))
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { packagesError = e.message ?: "Could not load packages" }
+        }
+
         LaunchedEffect(sessionId) {
             val id = sessionId ?: return@LaunchedEffect
             try {
-                repeat(50) {
+                val deadline = SystemClock.elapsedRealtime() + MAX_DURATION_S * 1000L + ANALYSIS_TIMEOUT_MS
+                while (SystemClock.elapsedRealtime() < deadline) {
                     val session = Api.request("/sessions/$id")
                     status = when (session.getString("state")) {
                         "pending" -> "Preparing"
-                        "capturing" -> "Recording on phone"
+                        "capturing" -> {
+                            val now = SystemClock.elapsedRealtime()
+                            val since = recordingStartedAt ?: now.also { recordingStartedAt = it }
+                            recordingSeconds = ((now - since) / 1000).toInt()
+                            "Recording on phone"
+                        }
+                        "stopping" -> "Stopping recording"
                         "analyzing" -> "Analyzing on phone"
                         "done" -> {
                             val payload = Api.request("/sessions/$id/results")
@@ -126,8 +155,16 @@ class MainActivity : ComponentActivity() {
             Text("Performance Profiler", style = MaterialTheme.typography.headlineMedium)
             Text(device)
             if (serial == null) TextButton(onClick = { refresh++ }) { Text("Reconnect") }
-            OutlinedTextField(target, { target = it }, label = { Text("Target package") },
-                enabled = !busy, singleLine = true, modifier = Modifier.fillMaxWidth())
+            PackagePicker(
+                value = target,
+                onValueChange = { target = it },
+                packages = packages,
+                loadError = packagesError,
+                enabled = !busy && serial != null,
+                onRetry = { packagesReload++ },
+            )
+            // Once the list is known, only an installed package can be started.
+            val targetInstalled = packages?.any { it.name == target.trim() } ?: true
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Workload.entries.forEach { condition ->
                     FilterChip(
@@ -139,16 +176,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
             Text(workload.instructions, style = MaterialTheme.typography.bodyMedium)
-            Button(enabled = serial != null && !busy && target.isNotBlank(), onClick = {
+            Button(enabled = serial != null && !busy && target.isNotBlank() && targetInstalled, onClick = {
                 val selected = serial ?: return@Button
                 val requestedTarget = target.trim()
                 val requestedWorkload = workload
                 starting = true; status = "Starting"; errorMessage = null; resultCsv = null
                 latestMetrics = null; latestMeminfo = null; meminfoError = null
+                stopRequested = false; recordingStartedAt = null; recordingSeconds = 0
                 scope.launch {
                     try {
                         val response = Api.request("/sessions", JSONObject()
-                            .put("serial", selected).put("package", requestedTarget).put("duration_s", DURATION))
+                            .put("serial", selected).put("package", requestedTarget).put("duration_s", MAX_DURATION_S))
                         submittedTarget = requestedTarget
                         submittedWorkload = requestedWorkload
                         sessionId = response.getString("id")
@@ -156,7 +194,19 @@ class MainActivity : ComponentActivity() {
                     catch (e: Exception) { status = "Failed"; errorMessage = e.message }
                     finally { starting = false }
                 }
-            }) { Text("Start 15-second run") }
+            }) { Text("Start recording (up to ${MAX_DURATION_S / 60} min)") }
+            if (sessionId != null && (status == "Preparing" || status == "Recording on phone")) {
+                // The trace recorded so far is kept and analyzed as usual.
+                Button(enabled = !stopRequested, onClick = {
+                    val id = sessionId ?: return@Button
+                    stopRequested = true
+                    scope.launch {
+                        try { Api.request("/sessions/$id/stop", JSONObject()) }
+                        catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { stopRequested = false; errorMessage = e.message }
+                    }
+                }) { Text(if (stopRequested) "Stopping…" else "Stop recording") }
+            }
             if (busy && status == "Recording on phone") {
                 OutlinedButton(onClick = {
                     val intent = packageManager.getLaunchIntentForPackage(submittedTarget)
@@ -165,6 +215,10 @@ class MainActivity : ComponentActivity() {
                 }) { Text("Open target app") }
             }
             Text(status, style = MaterialTheme.typography.titleLarge)
+            if (busy && status == "Recording on phone") {
+                Text(String.format(Locale.US, "%d:%02d / %d:%02d", recordingSeconds / 60, recordingSeconds % 60,
+                    MAX_DURATION_S / 60, MAX_DURATION_S % 60))
+            }
             errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (cpuByWorkload.values.any { it != null }) {
                 CpuComparison(cpuByWorkload)
