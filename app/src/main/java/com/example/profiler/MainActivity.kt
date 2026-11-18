@@ -182,6 +182,10 @@ class MainActivity : ComponentActivity() {
                 val spanNs = result?.spanNs ?: return@let
                 CpuTimeline(remember(metrics) { readMetricTable(metrics, "cpu_bins") }, spanNs)
                 RssTimeline(remember(metrics) { readMetricTable(metrics, "rss") }, spanNs)
+                PssSnapshots(
+                    remember(metrics) { readMetricTable(metrics, "pss_before") },
+                    remember(metrics) { readMetricTable(metrics, "pss_after") },
+                )
                 CpuDetails(remember(metrics) { readMetricTable(metrics, "cpu_details") })
             }
         }

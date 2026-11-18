@@ -176,8 +176,11 @@ class SessionService:
     def _run(self, session_id: str, request: StartRequest, stop_event: threading.Event) -> None:
         """Body of the per-session thread. Any error ends the session as failed."""
         try:
+            results = {}
+            self._snapshot_pss(results, "pss_before", request)
             trace_path = self._capture(session_id, request, stop_event)
             self._store.transition(session_id, SessionState.ANALYZING)
+            self._snapshot_pss(results, "pss_after", request)
             # Package is validated against PACKAGE_NAME_RE by find_package().
             package_literal = f"'{request.package}'" if request.package else "NULL"
             sql = CPU_QUERY_PATH.read_text(encoding="utf-8").replace("__PACKAGE__", package_literal)
@@ -188,7 +191,7 @@ class SessionService:
                 value is not None and value.isdigit() for value in rows[0].values()
             ) or int(rows[0]["trace_span_ns"]) <= 0:
                 raise RuntimeError("invalid CPU summary returned by phone")
-            results = {"cpu": output}
+            results["cpu"] = output
             self._relay_query(results, "cpu_details", CPU_DETAILS_QUERY_PATH, request, trace_path, package_literal)
             self._relay_query(results, "cpu_bins", CPU_BINS_QUERY_PATH, request, trace_path, package_literal)
             if request.package is not None:
@@ -200,6 +203,21 @@ class SessionService:
 
         finally:
             self._stop_events.pop(session_id, None)
+
+    def _snapshot_pss(self, results: dict[str, str], name: str, request: StartRequest) -> None:
+        if request.package is None:
+            return
+        try:
+            processes = adb.read_package_pss(request.serial, request.package, self._adb_path)
+        except adb.AdbError as error:
+            results[f"{name}_error"] = str(error)
+            return
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(("pid", "process_name", "pss_kib"))
+        writer.writerows(processes)
+        results[name] = output.getvalue()
 
     def _relay_query(
         self, results: dict[str, str], name: str, path: Path,

@@ -213,6 +213,34 @@ def find_package(serial: str, package: str, adb_path: str = "adb") -> dict | Non
     return None
 
 
+def read_package_pss(
+    serial: str, package: str, adb_path: str = "adb",
+) -> list[tuple[int, str, int | None]]:
+    """Read per-process PSS from a single package-scoped meminfo snapshot."""
+    if not PACKAGE_NAME_RE.fullmatch(package):
+        raise InvalidPackageNameError(f"invalid package name: {package!r}")
+    output = run_adb(
+        ["-s", serial, "shell", "dumpsys", "meminfo", "-s", "--package", package],
+        adb_path,
+        timeout=6,
+    )
+    if re.search(r"^No process found for:", output, re.MULTILINE):
+        return []
+
+    sections = re.split(r"^\*\* MEMINFO in pid (\d+) \[([^\]\n]+)\] \*\*\s*$", output, flags=re.MULTILINE)
+    if len(sections) == 1:
+        raise AdbError("No process memory snapshot returned by dumpsys meminfo")
+
+    processes = []
+    for pid, name, text in zip(sections[1::3], sections[2::3], sections[3::3]):
+        total = re.search(r"^\s*TOTAL PSS:\s*(\d+)\b", text, re.MULTILINE)
+        if total is None and "App Summary" in text:
+            summary = text.split("App Summary", 1)[1]
+            total = re.search(r"^\s*TOTAL:\s*(\d+)\b", summary, re.MULTILINE)
+        processes.append((int(pid), name, int(total.group(1)) if total else None))
+    return processes
+
+
 def start_perfetto(serial: str, config: str, output_path: str, adb_path: str = "adb") -> int:
     """Start Perfetto in background mode on the device and return its PID.
 

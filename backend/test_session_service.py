@@ -12,6 +12,7 @@ class PhoneResultTests(unittest.TestCase):
     details = '"kind","upid","pid","process_name","utid","tid","thread_name","cpu_ns","slice_count","thread_count"\n'
     bins = '"start_ns","end_ns","cpu_ns"\n0,900,42\n'
     rss = '"upid","pid","process_name","offset_ns","rss_bytes"\n'
+    pss_header = "pid,process_name,pss_kib\n"
 
     def setUp(self):
         self.store = SessionStore()
@@ -20,11 +21,13 @@ class PhoneResultTests(unittest.TestCase):
         self.session = self.store.create("device", 15, self.request.package)
         self.store.transition(self.session.id, SessionState.CAPTURING)
 
-    def run_capture(self, output, details=None):
+    def run_capture(self, output, details=None, snapshots=None):
         outputs = [output, self.details if details is None else details, self.bins, self.rss]
-        with patch.object(self.service, "_capture", return_value=self.path), patch(
-            "adb.query_trace", side_effect=outputs
-        ) as query:
+        with (
+            patch.object(self.service, "_capture", return_value=self.path),
+            patch("adb.query_trace", side_effect=outputs) as query,
+            patch("adb.read_package_pss", side_effect=snapshots if snapshots is not None else [[], []]),
+        ):
             self.service._run(self.session.id, self.request, None)
         return query.call_args_list[0].args
 
@@ -35,13 +38,24 @@ class PhoneResultTests(unittest.TestCase):
         self.assertEqual(self.service.get(self.session.id).state, SessionState.DONE)
         self.assertEqual(self.service.get_results(self.session.id), {
             "cpu": self.summary, "cpu_details": self.details, "cpu_bins": self.bins, "rss": self.rss,
+            "pss_before": self.pss_header, "pss_after": self.pss_header,
         })
 
     def test_details_failure_keeps_cpu_summary(self):
         self.run_capture(self.summary, adb.AdbError("details unavailable"))
         self.assertEqual(self.service.get_results(self.session.id), {
             "cpu": self.summary, "cpu_details_error": "details unavailable", "cpu_bins": self.bins, "rss": self.rss,
+            "pss_before": self.pss_header, "pss_after": self.pss_header,
         })
+
+    def test_pss_failure_does_not_discard_other_snapshot_or_trace_results(self):
+        self.run_capture(self.summary, snapshots=[
+            adb.AdbError("snapshot timed out"), [(123, "com.example.target", 700)],
+        ])
+        results = self.service.get_results(self.session.id)
+        self.assertEqual(results["pss_before_error"], "snapshot timed out")
+        self.assertEqual(results["pss_after"], self.pss_header + "123,com.example.target,700\n")
+        self.assertEqual(results["cpu"], self.summary)
 
     def test_unparseable_phone_result_never_marks_session_done(self):
         self.run_capture("not a result")
