@@ -20,7 +20,6 @@ import androidx.compose.ui.unit.dp
 import java.util.Locale
 
 private data class CpuBin(val start: Long, val end: Long, val cpu: Long)
-private data class RssPoint(val time: Long, val bytes: Long)
 
 @Composable
 internal fun CpuTimeline(table: MetricTable, spanNs: Long) {
@@ -49,47 +48,6 @@ internal fun CpuTimeline(table: MetricTable, spanNs: Long) {
                         val width = size.width * fraction(bin.end - bin.start, spanNs)
                         val height = size.height * fraction(bin.cpu, peak)
                         drawRect(color, Offset(x, size.height - height), Size(width * .88f, height))
-                    }
-                }
-                TimeAxis(spanNs)
-            }
-        }
-    }
-}
-
-@Composable
-internal fun RssTimeline(table: MetricTable, spanNs: Long) {
-    val processes = table.rows.groupBy { it["upid"] }
-    ChartCard("RSS over time · Perfetto samples") {
-        when {
-            table.error != null -> Text(table.error)
-            processes.isEmpty() -> Text("Unavailable · no target RSS samples in this trace")
-            else -> for ((upid, rows) in processes) {
-                val samples = rows.mapNotNull { row ->
-                    val time = row["offset_ns"]?.toLongOrNull() ?: return@mapNotNull null
-                    val bytes = row["rss_bytes"]?.toLongOrNull() ?: return@mapNotNull null
-                    if (time !in 0..spanNs || bytes < 0) return@mapNotNull null
-                    RssPoint(time, bytes)
-                }
-                val process = rows.first()
-                Text("${process["process_name"]} · PID ${process["pid"]} · UPID $upid")
-                if (samples.size != rows.size || upid == null) {
-                    Text("Invalid RSS samples")
-                    continue
-                }
-                val peak = samples.maxOf { it.bytes }
-                val peakMiB = String.format(Locale.US, "%.1f MiB", peak / 1048576.0)
-                val description = "${samples.size} samples · peak $peakMiB"
-                Text(description)
-                val color = MaterialTheme.colorScheme.tertiary
-                Canvas(Modifier.fillMaxWidth().height(72.dp).semantics {
-                    contentDescription = description
-                }) {
-                    for (sample in samples) {
-                        val point = Offset(size.width * fraction(sample.time, spanNs),
-                            size.height - 3.dp.toPx() -
-                                (size.height - 6.dp.toPx()) * fraction(sample.bytes, peak))
-                        drawCircle(color, radius = 3.dp.toPx(), center = point)
                     }
                 }
                 TimeAxis(spanNs)

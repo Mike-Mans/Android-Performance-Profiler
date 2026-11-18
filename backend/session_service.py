@@ -10,11 +10,13 @@ Each session runs in its own background thread, so start() returns immediately
 and the caller polls get() for progress.
 """
 
-import threading
-import time
 import csv
 import io
+import math
+import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import adb
@@ -26,6 +28,7 @@ CPU_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu.sql")
 CPU_DETAILS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu_details.sql")
 CPU_BINS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu_bins.sql")
 RSS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("rss.sql")
+TRACE_BOUNDS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("trace_bounds.sql")
 TRACE_DIR_ON_DEVICE = "/data/misc/perfetto-traces"
 
 POLL_INTERVAL_S = 1.0  # how often a running capture checks that Perfetto is alive
@@ -48,6 +51,11 @@ class ResultsNotReadyError(RuntimeError):
 class ServiceSettings:
     default_duration_s: int  # used when the caller gives no duration
     max_duration_s: int      # upper bound; also acts as the capture timeout
+    meminfo_interval_s: float = 5.0  # gap between dumpsys meminfo samples while capturing
+
+    def __post_init__(self) -> None:
+        if not self.meminfo_interval_s > 0:
+            raise ValueError("meminfo_interval_s must be greater than 0")
 
 
 @dataclass(frozen=True)
@@ -159,6 +167,20 @@ class SessionService:
         """Return all sessions, newest first. Not paginated."""
         return self._store.list()
 
+    @property
+    def meminfo_interval_s(self) -> float:
+        return self._settings.meminfo_interval_s
+
+    # Quoted: the list() method above shadows the builtin inside this class.
+    def get_meminfo(self, session_id: str) -> "list[dict]":
+        """Return the meminfo samples of a session, oldest first.
+
+        Available in any state: while capturing it holds the samples taken so
+        far, and once the capture has ended it is complete. Sessions without a
+        package have none. Raises SessionNotFoundError if the id is unknown.
+        """
+        return self._store.get(session_id).meminfo
+
     def get_results(self, session_id: str) -> dict[str, str]:
         """Return the result tables (name -> CSV text) of a finished session.
 
@@ -177,10 +199,8 @@ class SessionService:
         """Body of the per-session thread. Any error ends the session as failed."""
         try:
             results = {}
-            self._snapshot_pss(results, "pss_before", request)
             trace_path = self._capture(session_id, request, stop_event)
             self._store.transition(session_id, SessionState.ANALYZING)
-            self._snapshot_pss(results, "pss_after", request)
             # Package is validated against PACKAGE_NAME_RE by find_package().
             package_literal = f"'{request.package}'" if request.package else "NULL"
             sql = CPU_QUERY_PATH.read_text(encoding="utf-8").replace("__PACKAGE__", package_literal)
@@ -196,6 +216,10 @@ class SessionService:
             self._relay_query(results, "cpu_bins", CPU_BINS_QUERY_PATH, request, trace_path, package_literal)
             if request.package is not None:
                 self._relay_query(results, "rss", RSS_QUERY_PATH, request, trace_path, package_literal)
+                # Trace start on CLOCK_BOOTTIME, so the APK can place meminfo samples.
+                self._relay_query(
+                    results, "trace_bounds", TRACE_BOUNDS_QUERY_PATH, request, trace_path, package_literal
+                )
             self._store.update(session_id, results=results)
             self._store.transition(session_id, SessionState.DONE)
         except Exception as e:  # noqa: BLE001 - the thread must never die silently
@@ -203,21 +227,6 @@ class SessionService:
 
         finally:
             self._stop_events.pop(session_id, None)
-
-    def _snapshot_pss(self, results: dict[str, str], name: str, request: StartRequest) -> None:
-        if request.package is None:
-            return
-        try:
-            processes = adb.read_package_pss(request.serial, request.package, self._adb_path)
-        except adb.AdbError as error:
-            results[f"{name}_error"] = str(error)
-            return
-
-        output = io.StringIO()
-        writer = csv.writer(output, lineterminator="\n")
-        writer.writerow(("pid", "process_name", "pss_kib"))
-        writer.writerows(processes)
-        results[name] = output.getvalue()
 
     def _relay_query(
         self, results: dict[str, str], name: str, path: Path,
@@ -239,20 +248,75 @@ class SessionService:
         self._store.update(session_id, trace_path=trace_path, perfetto_pid=pid)
         self._store.transition(session_id, SessionState.CAPTURING)
 
-        # Perfetto ends on its own when its duration is over. Poll meanwhile so a
-        # stop request, or Perfetto dying early, is noticed within a second.
-        deadline = time.monotonic() + request.duration_s
-        while (remaining := deadline - time.monotonic()) > 0:
-            if stop_event.wait(min(POLL_INTERVAL_S, remaining)):
-                break
-            if not adb.is_perfetto_running(serial, pid, self._adb_path):
-                break
+        # Memory is sampled for exactly as long as the trace records.
+        sampler = None
+        sampler_done = threading.Event()
+        if request.package is not None:
+            sampler = threading.Thread(
+                target=self._sample_meminfo,
+                args=(session_id, serial, request.package, sampler_done),
+                name=f"meminfo-{session_id[:8]}",
+                daemon=True,
+            )
+            sampler.start()
+        try:
+            # Perfetto ends on its own when its duration is over. Poll meanwhile so a
+            # stop request, or Perfetto dying early, is noticed within a second.
+            deadline = time.monotonic() + request.duration_s
+            while (remaining := deadline - time.monotonic()) > 0:
+                if stop_event.wait(min(POLL_INTERVAL_S, remaining)):
+                    break
+                if not adb.is_perfetto_running(serial, pid, self._adb_path):
+                    break
+        finally:
+            # Let a sample that is in progress land before the session moves on.
+            sampler_done.set()
+            if sampler is not None:
+                sampler.join(timeout=adb.MEMINFO_TIMEOUT_S * 2)
 
         self._wait_for_exit(serial, pid)
         size = adb.trace_file_size(serial, trace_path, self._adb_path)
         if not size:
             raise RuntimeError("perfetto finished without producing a trace file")
         return trace_path
+
+    def _sample_meminfo(
+        self, session_id: str, serial: str, package: str, done: threading.Event
+    ) -> None:
+        """Take a meminfo sample every meminfo_interval_s until `done` is set.
+
+        The first sample is taken at once. Samples follow a fixed schedule from
+        the start, so a slow dumpsys does not make later samples drift; a slot
+        missed entirely is skipped rather than made up with a burst.
+        """
+        interval = self._settings.meminfo_interval_s
+        start = time.monotonic()
+        slot = 0
+        while not done.is_set():
+            self._take_meminfo_sample(session_id, serial, package)
+            slot = max(slot + 1, math.ceil((time.monotonic() - start) / interval))
+            if done.wait(start + slot * interval - time.monotonic()):
+                break
+
+    def _take_meminfo_sample(self, session_id: str, serial: str, package: str) -> None:
+        """Store one raw meminfo sample. A failed sample is stored with its error and
+        does not end the session: memory data is secondary to the trace."""
+        # The device clock is read just before and after dumpsys, so the two
+        # readings bound the moment memory was measured, on the trace's clock.
+        sample = {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "boottime_start_ns": None,
+            "boottime_end_ns": None,
+            "stdout": None,
+            "error": None,
+        }
+        try:
+            sample["boottime_start_ns"] = adb.boottime_ns(serial, self._adb_path)
+            sample["stdout"] = adb.dumpsys_meminfo(serial, package, self._adb_path)
+            sample["boottime_end_ns"] = adb.boottime_ns(serial, self._adb_path)
+        except Exception as e:  # noqa: BLE001 - the sampler thread must keep going
+            sample["error"] = f"{type(e).__name__}: {e}"
+        self._store.append_meminfo(session_id, sample)
 
     def _wait_for_exit(self, serial: str, pid: int) -> None:
         """Wait for Perfetto to exit; interrupt it once if it overruns its grace period."""

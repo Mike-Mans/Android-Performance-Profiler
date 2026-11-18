@@ -52,6 +52,8 @@ class MainActivity : ComponentActivity() {
         var status by remember { mutableStateOf("Ready") }
         var errorMessage by remember { mutableStateOf<String?>(null) }
         var latestMetrics by remember { mutableStateOf<JSONObject?>(null) }
+        var latestMeminfo by remember { mutableStateOf<JSONObject?>(null) }
+        var meminfoError by remember { mutableStateOf<String?>(null) }
         var resultCsv by rememberSaveable { mutableStateOf<String?>(null) }
         val result = remember(resultCsv) { resultCsv?.let(::readCpuSummary) }
         var submittedTarget by rememberSaveable { mutableStateOf("") }
@@ -90,6 +92,12 @@ class MainActivity : ComponentActivity() {
                             readCpuSummary(csv)
                             val key = runKey(session.getString("serial"), submittedTarget, submittedWorkload)
                             runs = Bundle(runs).apply { putString(key, csv) }
+                            // Raw dumpsys meminfo samples; parsed on the phone by MemoryTimeline.
+                            // A failure here only affects the memory chart, not the CPU results.
+                            latestMeminfo = try {
+                                Api.request("/sessions/$id/meminfo")
+                            } catch (e: CancellationException) { throw e }
+                            catch (e: Exception) { meminfoError = e.message ?: "Meminfo request failed"; null }
                             latestMetrics = metrics
                             resultCsv = csv
                             "Complete"
@@ -136,7 +144,7 @@ class MainActivity : ComponentActivity() {
                 val requestedTarget = target.trim()
                 val requestedWorkload = workload
                 starting = true; status = "Starting"; errorMessage = null; resultCsv = null
-                latestMetrics = null
+                latestMetrics = null; latestMeminfo = null; meminfoError = null
                 scope.launch {
                     try {
                         val response = Api.request("/sessions", JSONObject()
@@ -181,10 +189,12 @@ class MainActivity : ComponentActivity() {
             latestMetrics?.let { metrics ->
                 val spanNs = result?.spanNs ?: return@let
                 CpuTimeline(remember(metrics) { readMetricTable(metrics, "cpu_bins") }, spanNs)
-                RssTimeline(remember(metrics) { readMetricTable(metrics, "rss") }, spanNs)
-                PssSnapshots(
-                    remember(metrics) { readMetricTable(metrics, "pss_before") },
-                    remember(metrics) { readMetricTable(metrics, "pss_after") },
+                MemoryTimeline(
+                    rss = remember(metrics) { readMetricTable(metrics, "rss") },
+                    bounds = remember(metrics) { readMetricTable(metrics, "trace_bounds") },
+                    meminfo = latestMeminfo,
+                    meminfoError = meminfoError,
+                    spanNs = spanNs,
                 )
                 CpuDetails(remember(metrics) { readMetricTable(metrics, "cpu_details") })
             }

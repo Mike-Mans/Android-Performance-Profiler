@@ -12,3 +12,6 @@ path = "adb"
 default_duration_s = 30
 # Upper bound for any session. Also acts as the capture timeout.
 max_duration_s = 300
+# Gap between `dumpsys meminfo` samples while a session is capturing, in seconds.
+# Only sessions with a package are sampled; the APK parses the raw output.
+meminfo_interval_s = 5
