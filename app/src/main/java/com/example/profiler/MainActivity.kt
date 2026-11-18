@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
         var starting by remember { mutableStateOf(false) }
         var status by remember { mutableStateOf("Ready") }
         var errorMessage by remember { mutableStateOf<String?>(null) }
+        var latestMetrics by remember { mutableStateOf<JSONObject?>(null) }
         var resultCsv by rememberSaveable { mutableStateOf<String?>(null) }
         val result = remember(resultCsv) { resultCsv?.let(::readCpuSummary) }
         var submittedTarget by rememberSaveable { mutableStateOf("") }
@@ -84,10 +85,12 @@ class MainActivity : ComponentActivity() {
                         "done" -> {
                             val payload = Api.request("/sessions/$id/results")
                             require(payload.getString("analysis_location") == "android_shell")
-                            val csv = payload.getJSONObject("results").getString("cpu")
+                            val metrics = payload.getJSONObject("results")
+                            val csv = metrics.getString("cpu")
                             readCpuSummary(csv)
                             val key = runKey(session.getString("serial"), submittedTarget, submittedWorkload)
                             runs = Bundle(runs).apply { putString(key, csv) }
+                            latestMetrics = metrics
                             resultCsv = csv
                             "Complete"
                         }
@@ -133,6 +136,7 @@ class MainActivity : ComponentActivity() {
                 val requestedTarget = target.trim()
                 val requestedWorkload = workload
                 starting = true; status = "Starting"; errorMessage = null; resultCsv = null
+                latestMetrics = null
                 scope.launch {
                     try {
                         val response = Api.request("/sessions", JSONObject()
@@ -173,6 +177,9 @@ class MainActivity : ComponentActivity() {
                         Text("Computed on Android")
                     }
                 }
+            }
+            latestMetrics?.let { metrics ->
+                CpuDetails(remember(metrics) { readMetricTable(metrics, "cpu_details") })
             }
         }
     }
@@ -215,4 +222,4 @@ private fun CpuComparison(results: Map<Workload, CpuResult?>) {
     }
 }
 
-private fun formatCpuTime(ns: Long): String = String.format(Locale.US, "%.6f CPU s", ns / 1e9)
+internal fun formatCpuTime(ns: Long): String = String.format(Locale.US, "%.6f CPU s", ns / 1e9)

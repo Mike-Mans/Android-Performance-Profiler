@@ -23,6 +23,7 @@ from sessions import InvalidTransitionError, Session, SessionState, SessionStore
 # Base Perfetto config; the service appends the capture duration to it.
 TRACE_CONFIG_PATH = Path(__file__).resolve().parent.parent / "on_device" / "cpu_mem.pbtxt"
 CPU_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu.sql")
+CPU_DETAILS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu_details.sql")
 TRACE_DIR_ON_DEVICE = "/data/misc/perfetto-traces"
 
 POLL_INTERVAL_S = 1.0  # how often a running capture checks that Perfetto is alive
@@ -185,13 +186,25 @@ class SessionService:
                 value is not None and value.isdigit() for value in rows[0].values()
             ) or int(rows[0]["trace_span_ns"]) <= 0:
                 raise RuntimeError("invalid CPU summary returned by phone")
-            self._store.update(session_id, results={"cpu": output})
+            results = {"cpu": output}
+            self._relay_query(results, "cpu_details", CPU_DETAILS_QUERY_PATH, request, trace_path, package_literal)
+            self._store.update(session_id, results=results)
             self._store.transition(session_id, SessionState.DONE)
         except Exception as e:  # noqa: BLE001 - the thread must never die silently
             self._fail(session_id, e)
 
         finally:
             self._stop_events.pop(session_id, None)
+
+    def _relay_query(
+        self, results: dict[str, str], name: str, path: Path,
+        request: StartRequest, trace_path: str, package_literal: str,
+    ) -> None:
+        sql = path.read_text(encoding="utf-8").replace("__PACKAGE__", package_literal)
+        try:
+            results[name] = adb.query_trace(request.serial, trace_path, sql, self._adb_path)
+        except adb.AdbError as error:
+            results[f"{name}_error"] = str(error)
 
     def _capture(self, session_id: str, request: StartRequest, stop_event: threading.Event) -> str:
         """Record a trace on the device until the duration is over or stop is requested."""
