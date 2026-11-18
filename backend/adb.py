@@ -277,6 +277,45 @@ def query_trace(serial: str, path: str, sql: str, adb_path: str = "adb") -> str:
             pass
 
 
+# `dumpsys meminfo` without a package walks every process and can take seconds.
+MEMINFO_TIMEOUT_S = 30
+
+
+def parse_uptime_ns(text: str) -> int:
+    """Convert `/proc/uptime` output to nanoseconds of CLOCK_BOOTTIME.
+
+    The file holds two numbers, e.g. "12345.67 54321.00"; the first is the time
+    since boot including suspend, which is the clock Perfetto timestamps use.
+    Raises AdbError if the text is not in that format.
+    """
+    first = text.split()[0] if text.split() else ""
+    match = re.fullmatch(r"(\d+)\.(\d{1,9})", first)
+    if match is None:
+        raise AdbError(f"unexpected /proc/uptime output: {text.strip()!r}")
+    whole, fraction = match.groups()
+    return int(whole) * 1_000_000_000 + int(fraction.ljust(9, "0"))
+
+
+def boottime_ns(serial: str, adb_path: str = "adb") -> int:
+    """Read the device's CLOCK_BOOTTIME, the clock of Perfetto trace timestamps."""
+    return parse_uptime_ns(run_adb(["-s", serial, "shell", "cat", "/proc/uptime"], adb_path))
+
+
+def dumpsys_meminfo(serial: str, package: str | None = None, adb_path: str = "adb") -> str:
+    """Run `dumpsys meminfo` on the device and return its stdout unchanged.
+
+    With a package, reports that app only; without one, the whole system. The
+    text is not parsed here: the APK parses it.
+    Raises InvalidPackageNameError if the package name is malformed.
+    """
+    args = ["-s", serial, "shell", "dumpsys", "meminfo"]
+    if package is not None:
+        if not PACKAGE_NAME_RE.fullmatch(package):
+            raise InvalidPackageNameError(f"invalid package name: {package!r}")
+        args.append(package)
+    return run_adb(args, adb_path, timeout=MEMINFO_TIMEOUT_S)
+
+
 def validate_address(address: str) -> str:
     """Check that `address` is HOST:PORT with an IPv4 host or "localhost".
 

@@ -58,6 +58,7 @@ Main endpoints:
 | `POST /sessions` | Start a profiling run; returns a session id immediately |
 | `GET /sessions/{id}` | State of one session (pending, capturing, analyzing, done, failed) |
 | `GET /sessions/{id}/results` | Result tables of a finished session |
+| `GET /sessions/{id}/meminfo` | `dumpsys meminfo` samples taken during the capture, with device boot-time timestamps that match the trace |
 
 A session run from `/docs`: call `GET /devices` and copy a `serial`, call
 `POST /sessions` with `{"serial": "<serial>", "duration_s": 15}` (add
