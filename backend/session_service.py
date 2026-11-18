@@ -24,6 +24,8 @@ from sessions import InvalidTransitionError, Session, SessionState, SessionStore
 TRACE_CONFIG_PATH = Path(__file__).resolve().parent.parent / "on_device" / "cpu_mem.pbtxt"
 CPU_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu.sql")
 CPU_DETAILS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu_details.sql")
+CPU_BINS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu_bins.sql")
+RSS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("rss.sql")
 TRACE_DIR_ON_DEVICE = "/data/misc/perfetto-traces"
 
 POLL_INTERVAL_S = 1.0  # how often a running capture checks that Perfetto is alive
@@ -188,6 +190,9 @@ class SessionService:
                 raise RuntimeError("invalid CPU summary returned by phone")
             results = {"cpu": output}
             self._relay_query(results, "cpu_details", CPU_DETAILS_QUERY_PATH, request, trace_path, package_literal)
+            self._relay_query(results, "cpu_bins", CPU_BINS_QUERY_PATH, request, trace_path, package_literal)
+            if request.package is not None:
+                self._relay_query(results, "rss", RSS_QUERY_PATH, request, trace_path, package_literal)
             self._store.update(session_id, results=results)
             self._store.transition(session_id, SessionState.DONE)
         except Exception as e:  # noqa: BLE001 - the thread must never die silently

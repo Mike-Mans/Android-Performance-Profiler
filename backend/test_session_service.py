@@ -10,6 +10,8 @@ class PhoneResultTests(unittest.TestCase):
     path = "/data/misc/perfetto-traces/test.pftrace"
     summary = '"cpu_ns","process_count","slice_count","trace_span_ns"\n42,1,2,900\n'
     details = '"kind","upid","pid","process_name","utid","tid","thread_name","cpu_ns","slice_count","thread_count"\n'
+    bins = '"start_ns","end_ns","cpu_ns"\n0,900,42\n'
+    rss = '"upid","pid","process_name","offset_ns","rss_bytes"\n'
 
     def setUp(self):
         self.store = SessionStore()
@@ -19,7 +21,7 @@ class PhoneResultTests(unittest.TestCase):
         self.store.transition(self.session.id, SessionState.CAPTURING)
 
     def run_capture(self, output, details=None):
-        outputs = [output, self.details if details is None else details]
+        outputs = [output, self.details if details is None else details, self.bins, self.rss]
         with patch.object(self.service, "_capture", return_value=self.path), patch(
             "adb.query_trace", side_effect=outputs
         ) as query:
@@ -32,13 +34,13 @@ class PhoneResultTests(unittest.TestCase):
         self.assertIn("'com.example.target'", sql)
         self.assertEqual(self.service.get(self.session.id).state, SessionState.DONE)
         self.assertEqual(self.service.get_results(self.session.id), {
-            "cpu": self.summary, "cpu_details": self.details,
+            "cpu": self.summary, "cpu_details": self.details, "cpu_bins": self.bins, "rss": self.rss,
         })
 
     def test_details_failure_keeps_cpu_summary(self):
         self.run_capture(self.summary, adb.AdbError("details unavailable"))
         self.assertEqual(self.service.get_results(self.session.id), {
-            "cpu": self.summary, "cpu_details_error": "details unavailable",
+            "cpu": self.summary, "cpu_details_error": "details unavailable", "cpu_bins": self.bins, "rss": self.rss,
         })
 
     def test_unparseable_phone_result_never_marks_session_done(self):

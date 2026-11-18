@@ -179,6 +179,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
             latestMetrics?.let { metrics ->
+                val spanNs = result?.spanNs ?: return@let
+                CpuTimeline(remember(metrics) { readMetricTable(metrics, "cpu_bins") }, spanNs)
+                RssTimeline(remember(metrics) { readMetricTable(metrics, "rss") }, spanNs)
                 CpuDetails(remember(metrics) { readMetricTable(metrics, "cpu_details") })
             }
         }
