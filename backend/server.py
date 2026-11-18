@@ -7,7 +7,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 import adb
 import sessions
@@ -50,6 +50,8 @@ ERROR_STATUS: dict[type[Exception], int] = {
     InvalidDurationError: 422,
     ResultsNotReadyError: 409,
     adb.InvalidPackageNameError: 422,
+    adb.InvalidAddressError: 422,
+    adb.InvalidPairingCodeError: 422,
     adb.AdbError: 502,
 }
 
@@ -75,6 +77,22 @@ class StartSessionRequest(BaseModel):
     package: str | None = None     # optional target app; omit for an idle baseline
 
 
+class ConnectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # reject unknown fields
+
+    host: str                          # phone IP shown on the Wireless debugging screen
+    connect_port: int                  # port shown on the main Wireless debugging screen
+    # Pairing is needed once per computer; give both fields, or neither.
+    pairing_port: int | None = None    # port shown on the "pair with code" screen
+    pairing_code: str | None = None    # six-digit code shown on the same screen
+
+    @model_validator(mode="after")
+    def pairing_fields_go_together(self):
+        if (self.pairing_port is None) != (self.pairing_code is None):
+            raise ValueError("pairing_port and pairing_code must be given together")
+        return self
+
+
 @app.get("/health")
 def health() -> dict:
     """Liveness check used by the APK to verify the backend is reachable."""
@@ -88,6 +106,39 @@ def devices() -> dict:
         return {"devices": adb.list_devices(ADB_PATH)}
     except adb.AdbError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/devices/connect")
+def connect_device(body: ConnectRequest):
+    """Connect to a phone over wireless debugging, pairing first when asked to.
+
+    Returns {"serial", "paired", "connected"}; `serial` is what the other
+    endpoints take. `paired` is true only when this call performed the pairing.
+    If pairing succeeds but connecting fails, the response is HTTP 502 with
+    paired=true: the one-time pairing code is used up, so the client should retry
+    with the host and connect_port only.
+    """
+    connect_address = f"{body.host}:{body.connect_port}"
+    pairing_address = None if body.pairing_port is None else f"{body.host}:{body.pairing_port}"
+
+    # Validate everything before acting, so a typo in the connect address cannot
+    # waste a one-time pairing code.
+    adb.validate_address(connect_address)
+    if pairing_address is not None:
+        adb.validate_address(pairing_address)
+        adb.validate_pairing_code(body.pairing_code)
+
+    paired = False
+    try:
+        if pairing_address is not None:
+            adb.pair(pairing_address, body.pairing_code, ADB_PATH)
+            paired = True
+        serial = adb.connect(connect_address, ADB_PATH)
+    except adb.AdbError as e:
+        return JSONResponse(
+            status_code=502, content={"detail": str(e), "paired": paired, "connected": False}
+        )
+    return {"serial": serial, "paired": paired, "connected": True}
 
 
 @app.get("/packages")
