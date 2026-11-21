@@ -11,6 +11,7 @@ and the caller polls get() for progress.
 """
 
 import csv
+import hashlib
 import io
 import math
 import threading
@@ -29,6 +30,7 @@ CPU_DETAILS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu_details.sql")
 CPU_BINS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("cpu_bins.sql")
 RSS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("rss.sql")
 TRACE_BOUNDS_QUERY_PATH = TRACE_CONFIG_PATH.with_name("trace_bounds.sql")
+BATTERY_QUERY_PATH = TRACE_CONFIG_PATH.with_name("battery.sql")
 TRACE_DIR_ON_DEVICE = "/data/misc/perfetto-traces"
 
 POLL_INTERVAL_S = 1.0  # how often a running capture checks that Perfetto is alive
@@ -187,6 +189,15 @@ class SessionService:
         """
         return self._store.get(session_id).meminfo
 
+    def get_battery(self, session_id: str) -> "dict[str, dict]":
+        """Return the raw battery snapshots of a session, by name.
+
+        Available in any state: the "before" snapshots appear once the session
+        starts, the "after" ones once the capture has ended. Raises
+        SessionNotFoundError if the id is unknown.
+        """
+        return self._store.get(session_id).battery
+
     def get_results(self, session_id: str) -> dict[str, str]:
         """Return the result tables (name -> CSV text) of a finished session.
 
@@ -205,7 +216,10 @@ class SessionService:
         """Body of the per-session thread. Any error ends the session as failed."""
         try:
             results = {}
+            # Battery snapshots bracket the capture as tightly as possible.
+            self._snapshot_battery(session_id, request, before=True)
             trace_path = self._capture(session_id, request, stop_event)
+            self._snapshot_battery(session_id, request, before=False)
             self._store.transition(session_id, SessionState.ANALYZING)
             # Package is validated against PACKAGE_NAME_RE by find_package().
             package_literal = f"'{request.package}'" if request.package else "NULL"
@@ -220,6 +234,8 @@ class SessionService:
             results["cpu"] = output
             self._relay_query(results, "cpu_details", CPU_DETAILS_QUERY_PATH, request, trace_path, package_literal)
             self._relay_query(results, "cpu_bins", CPU_BINS_QUERY_PATH, request, trace_path, package_literal)
+            # Device-wide battery counters / power rails from the trace; empty CSV if unsupported.
+            self._relay_query(results, "battery", BATTERY_QUERY_PATH, request, trace_path, package_literal)
             if request.package is not None:
                 self._relay_query(results, "rss", RSS_QUERY_PATH, request, trace_path, package_literal)
                 # Trace start on CLOCK_BOOTTIME, so the APK can place meminfo samples.
@@ -248,10 +264,14 @@ class SessionService:
         """Record a trace on the device until the duration is over or stop is requested."""
         serial = request.serial
         trace_path = f"{TRACE_DIR_ON_DEVICE}/{session_id}.pftrace"
-        config = TRACE_CONFIG_PATH.read_text() + f"\nduration_ms: {request.duration_s * 1000}\n"
+        base_config = TRACE_CONFIG_PATH.read_text()
+        config = base_config + f"\nduration_ms: {request.duration_s * 1000}\n"
 
         pid = adb.start_perfetto(serial, config, trace_path, self._adb_path)
-        self._store.update(session_id, trace_path=trace_path, perfetto_pid=pid)
+        # Hash without duration_ms, so a 30 s and a 60 s run of the same config match.
+        config_sha = hashlib.sha256(base_config.encode()).hexdigest()
+        self._store.update(session_id, trace_path=trace_path, perfetto_pid=pid,
+                           trace_config_sha256=config_sha)
         self._store.transition(session_id, SessionState.CAPTURING)
 
         # Memory is sampled for exactly as long as the trace records.
@@ -313,8 +333,42 @@ class SessionService:
     def _take_meminfo_sample(self, session_id: str, serial: str, package: str) -> None:
         """Store one raw meminfo sample. A failed sample is stored with its error and
         does not end the session: memory data is secondary to the trace."""
-        # The device clock is read just before and after dumpsys, so the two
-        # readings bound the moment memory was measured, on the trace's clock.
+        sample = self._raw_sample(serial, lambda: adb.dumpsys_meminfo(serial, package, self._adb_path))
+        self._store.append_meminfo(session_id, sample)
+
+    def _snapshot_battery(self, session_id: str, request: StartRequest, before: bool) -> None:
+        """Store raw battery snapshots on one side of the capture.
+
+        before=True:  reset batterystats (package runs only), then `dumpsys battery`.
+        before=False: `batterystats --charged <package>` (covers reset..now), then
+                      `dumpsys battery`.
+        Like meminfo, a failed snapshot keeps its error and does not end the session,
+        so the APK can show "unsupported (reason)" instead of a fabricated zero.
+        """
+        serial = request.serial
+        steps = []
+        if request.package is not None:
+            if before:
+                steps.append(("batterystats_reset",
+                              lambda: adb.reset_batterystats(serial, self._adb_path)))
+            else:
+                steps.append(("batterystats",
+                              lambda: adb.dumpsys_batterystats(serial, request.package, self._adb_path)))
+        steps.append(("battery_before" if before else "battery_after",
+                      lambda: adb.dumpsys_battery(serial, self._adb_path)))
+        # Only this session's thread writes `battery`, so read-modify-write is safe.
+        battery = self._store.get(session_id).battery
+        for name, run in steps:
+            battery[name] = self._raw_sample(serial, run)
+            self._store.update(session_id, battery=dict(battery))
+
+    def _raw_sample(self, serial: str, run) -> dict:
+        """Run one dumpsys command and wrap its unparsed stdout with timestamps.
+
+        The device clock is read just before and after, so the two readings bound
+        the moment of measurement on the trace's clock (CLOCK_BOOTTIME). Errors are
+        stored in the sample, never raised.
+        """
         sample = {
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "boottime_start_ns": None,
@@ -324,11 +378,11 @@ class SessionService:
         }
         try:
             sample["boottime_start_ns"] = adb.boottime_ns(serial, self._adb_path)
-            sample["stdout"] = adb.dumpsys_meminfo(serial, package, self._adb_path)
+            sample["stdout"] = run()
             sample["boottime_end_ns"] = adb.boottime_ns(serial, self._adb_path)
-        except Exception as e:  # noqa: BLE001 - the sampler thread must keep going
+        except Exception as e:  # noqa: BLE001 - samplers must keep going
             sample["error"] = f"{type(e).__name__}: {e}"
-        self._store.append_meminfo(session_id, sample)
+        return sample
 
     def _wait_for_exit(self, serial: str, pid: int) -> None:
         """Wait for Perfetto to exit; interrupt it once if it overruns its grace period."""

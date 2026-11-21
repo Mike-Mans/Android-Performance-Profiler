@@ -35,7 +35,9 @@ TRANSITIONS: dict[SessionState, set[SessionState]] = {
 TERMINAL_STATES = {SessionState.DONE, SessionState.FAILED}
 
 # Fields that may be changed through SessionStore.update().
-UPDATABLE_FIELDS = {"package", "uid", "trace_path", "perfetto_pid", "results"}
+UPDATABLE_FIELDS = {
+    "package", "uid", "trace_path", "perfetto_pid", "results", "battery", "trace_config_sha256",
+}
 
 
 class SessionNotFoundError(KeyError):
@@ -73,6 +75,12 @@ class Session:
     # with boottime_start_ns/boottime_end_ns (device CLOCK_BOOTTIME, the clock of
     # the trace), captured_at (computer UTC, ISO 8601), stdout (raw dumpsys output) and error.
     meminfo: list[dict] = field(default_factory=list)
+    # Raw battery snapshots by name (battery_before, batterystats_reset, battery_after,
+    # batterystats), each shaped like a meminfo sample. Unparsed: the APK parses them.
+    battery: dict[str, dict] = field(default_factory=dict)
+    # SHA-256 of on_device/cpu_mem.pbtxt as sent (before duration_ms is appended), so
+    # runs recorded with different trace configs are never compared as equals.
+    trace_config_sha256: str | None = None
 
     def to_dict(self, include_results: bool = False) -> dict:
         """JSON-friendly view. Results are omitted unless asked for."""
@@ -89,6 +97,7 @@ class Session:
             "error": self.error,
             "trace_path": self.trace_path,
             "perfetto_pid": self.perfetto_pid,
+            "trace_config_sha256": self.trace_config_sha256,
         }
         if include_results:
             data["results"] = dict(self.results)
@@ -100,6 +109,7 @@ def _copy(session: Session) -> Session:
         session,
         results=dict(session.results),
         meminfo=[dict(sample) for sample in session.meminfo],
+        battery={name: dict(sample) for name, sample in session.battery.items()},
     )
 
 
