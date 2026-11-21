@@ -37,3 +37,20 @@ data_sources {
     }
   }
 }
+# Device-wide battery counters and, where the HAL has them (mostly Pixels),
+# per-subsystem power rails. A counter the phone lacks just has no track;
+# on_device/battery.sql reports what was recorded.
+data_sources {
+  config {
+    name: "android.power"
+    target_buffer: 1
+    android_power_config {
+      battery_poll_ms: 250
+      battery_counters: BATTERY_COUNTER_CHARGE
+      battery_counters: BATTERY_COUNTER_CAPACITY_PERCENT
+      battery_counters: BATTERY_COUNTER_CURRENT
+      battery_counters: BATTERY_COUNTER_VOLTAGE
+      collect_power_rails: true
+    }
+  }
+}
