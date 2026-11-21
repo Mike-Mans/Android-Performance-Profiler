@@ -208,6 +208,26 @@ def session_meminfo(session_id: str) -> dict:
     }
 
 
+@app.get("/sessions/{session_id}/battery")
+def session_battery(session_id: str) -> dict:
+    """Return the raw battery snapshots taken around the capture, by name.
+
+    battery_before / battery_after: `dumpsys battery` (device-wide).
+    batterystats_reset / batterystats: reset and `--charged <package>` dump
+    (per-UID estimate; package sessions only). `uid` lets the APK pick the
+    target's line. Each snapshot has stdout (unparsed), error and boottime
+    readings on the trace clock. The "after" ones appear once capture ends.
+    """
+    session = service.get(session_id)
+    return {
+        "session_id": session.id,
+        "package": session.package,
+        "uid": session.uid,
+        "clock": "boottime",
+        "snapshots": service.get_battery(session_id),
+    }
+
+
 if __name__ == "__main__":
     server_cfg = config["server"]
     uvicorn.run(app, host=server_cfg["host"], port=server_cfg["port"])
