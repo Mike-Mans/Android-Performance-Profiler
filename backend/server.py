@@ -177,9 +177,35 @@ def get_session(session_id: str) -> dict:
     return service.get(session_id).to_dict()
 
 
+@app.post("/sessions/{session_id}/stop")
+def stop_session(session_id: str) -> dict:
+    """End a capture early. The trace recorded so far is finalized and analyzed as
+    usual. Idempotent; returns the session without waiting for it to finish."""
+    return service.stop(session_id).to_dict()
+
+
 @app.get("/sessions/{session_id}/results")
 def session_results(session_id: str) -> dict:
     return {"analysis_location": "android_shell", "results": service.get_results(session_id)}
+
+
+@app.get("/sessions/{session_id}/meminfo")
+def session_meminfo(session_id: str) -> dict:
+    """Return the dumpsys meminfo samples taken while the session was capturing.
+
+    Can be polled during a capture. Each sample's boottime_start_ns and
+    boottime_end_ns are device CLOCK_BOOTTIME readings taken just before and
+    after dumpsys ran; they are on the same clock as the timestamps (`ts`) in
+    the session's Perfetto trace. `stdout` is the raw dumpsys output, unparsed. A failed sample has `error` set.
+    """
+    session = service.get(session_id)
+    return {
+        "session_id": session.id,
+        "package": session.package,  # null: no samples are taken
+        "interval_s": service.meminfo_interval_s,
+        "clock": "boottime",
+        "samples": service.get_meminfo(session_id),
+    }
 
 
 if __name__ == "__main__":

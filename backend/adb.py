@@ -213,6 +213,46 @@ def find_package(serial: str, package: str, adb_path: str = "adb") -> dict | Non
     return None
 
 
+# A package-scoped summary is small; a slow answer would just delay the next sample.
+MEMINFO_TIMEOUT_S = 10
+
+
+def parse_uptime_ns(text: str) -> int:
+    """Convert `/proc/uptime` output to nanoseconds of CLOCK_BOOTTIME.
+
+    The file holds two numbers, e.g. "12345.67 54321.00"; the first is the time
+    since boot including suspend, which is the clock Perfetto timestamps use.
+    Raises AdbError if the text is not in that format.
+    """
+    first = text.split()[0] if text.split() else ""
+    match = re.fullmatch(r"(\d+)\.(\d{1,9})", first)
+    if match is None:
+        raise AdbError(f"unexpected /proc/uptime output: {text.strip()!r}")
+    whole, fraction = match.groups()
+    return int(whole) * 1_000_000_000 + int(fraction.ljust(9, "0"))
+
+
+def boottime_ns(serial: str, adb_path: str = "adb") -> int:
+    """Read the device's CLOCK_BOOTTIME, the clock of Perfetto trace timestamps."""
+    return parse_uptime_ns(run_adb(["-s", serial, "shell", "cat", "/proc/uptime"], adb_path))
+
+
+def dumpsys_meminfo(serial: str, package: str, adb_path: str = "adb") -> str:
+    """Run a package-scoped `dumpsys meminfo` summary and return its stdout unchanged.
+
+    `--package` covers every process of the app (including `pkg:service` ones).
+    The text is not parsed here: the APK parses it.
+    Raises InvalidPackageNameError if the package name is malformed.
+    """
+    if not PACKAGE_NAME_RE.fullmatch(package):
+        raise InvalidPackageNameError(f"invalid package name: {package!r}")
+    return run_adb(
+        ["-s", serial, "shell", "dumpsys", "meminfo", "-s", "--package", package],
+        adb_path,
+        timeout=MEMINFO_TIMEOUT_S,
+    )
+
+
 def start_perfetto(serial: str, config: str, output_path: str, adb_path: str = "adb") -> int:
     """Start Perfetto in background mode on the device and return its PID.
 

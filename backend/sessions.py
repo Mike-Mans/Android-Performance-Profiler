@@ -69,6 +69,10 @@ class Session:
     trace_path: str | None = None                       # trace file path on the phone
     perfetto_pid: int | None = None                     # PID of the Perfetto process on the phone
     results: dict[str, str] = field(default_factory=dict)  # result name -> CSV text
+    # dumpsys meminfo samples taken while capturing, oldest first. Each is a dict
+    # with boottime_start_ns/boottime_end_ns (device CLOCK_BOOTTIME, the clock of
+    # the trace), captured_at (computer UTC, ISO 8601), stdout (raw dumpsys output) and error.
+    meminfo: list[dict] = field(default_factory=list)
 
     def to_dict(self, include_results: bool = False) -> dict:
         """JSON-friendly view. Results are omitted unless asked for."""
@@ -92,7 +96,11 @@ class Session:
 
 
 def _copy(session: Session) -> Session:
-    return replace(session, results=dict(session.results))
+    return replace(
+        session,
+        results=dict(session.results),
+        meminfo=[dict(sample) for sample in session.meminfo],
+    )
 
 
 class SessionStore:
@@ -157,6 +165,11 @@ class SessionStore:
             for key, value in fields.items():
                 setattr(session, key, value)
             return _copy(session)
+
+    def append_meminfo(self, session_id: str, sample: dict) -> None:
+        """Add one meminfo sample to a session, in any state."""
+        with self._lock:
+            self._get(session_id).meminfo.append(dict(sample))
 
     def _get(self, session_id: str) -> Session:
         try:

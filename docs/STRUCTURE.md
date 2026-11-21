@@ -7,7 +7,7 @@ android-profiler/
 ├── schema/
 │   └── run.schema.json
 ├── on_device/
-│   ├── trace.pbtxt
+│   ├── cpu_mem.pbtxt
 │   └── cpu.sql
 ├── scripts/
 │   └── build_trace_processor.sh
@@ -45,7 +45,7 @@ Checkpoint reports (Week 1, 3, 5), the final report, and notes on which metrics 
 ### `schema/run.schema.json`
 JSON Schema for one run record: device, target package, labels, trace config version, measurements, missing metrics, inference. The bridge must send data that matches it. The APK must parse data that matches it. Exports from the APK follow it too. Change this file first whenever the data shape changes.
 
-### `on_device/trace.pbtxt`
+### `on_device/cpu_mem.pbtxt`
 Perfetto trace config. Declares which data sources to record (starting with `linux.ftrace` `sched_switch`, later `linux.process_stats`, `android.power`) and buffer size. The bridge pipes it to `perfetto` on the phone over stdin, because SELinux may block reading configs from `/data/local/tmp`.
 
 ### `on_device/cpu.sql`
