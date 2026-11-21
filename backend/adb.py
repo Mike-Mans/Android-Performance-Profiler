@@ -253,6 +253,32 @@ def dumpsys_meminfo(serial: str, package: str, adb_path: str = "adb") -> str:
     )
 
 
+# batterystats walks every UID's history; it is slower than meminfo.
+BATTERYSTATS_TIMEOUT_S = 30
+
+
+def dumpsys_battery(serial: str, adb_path: str = "adb") -> str:
+    """Return `dumpsys battery` (level, plugged state, temperature, voltage) unchanged."""
+    return run_adb(["-s", serial, "shell", "dumpsys", "battery"], adb_path)
+
+
+def reset_batterystats(serial: str, adb_path: str = "adb") -> str:
+    """Clear the device's battery statistics, so a later --charged dump covers only the run."""
+    return run_adb(["-s", serial, "shell", "dumpsys", "batterystats", "--reset"],
+                   adb_path, timeout=BATTERYSTATS_TIMEOUT_S)
+
+
+def dumpsys_batterystats(serial: str, package: str, adb_path: str = "adb") -> str:
+    """Return `dumpsys batterystats --charged <package>` unchanged; the APK parses it.
+
+    Raises InvalidPackageNameError if the package name is malformed.
+    """
+    if not PACKAGE_NAME_RE.fullmatch(package):
+        raise InvalidPackageNameError(f"invalid package name: {package!r}")
+    return run_adb(["-s", serial, "shell", "dumpsys", "batterystats", "--charged", package],
+                   adb_path, timeout=BATTERYSTATS_TIMEOUT_S)
+
+
 def start_perfetto(serial: str, config: str, output_path: str, adb_path: str = "adb") -> int:
     """Start Perfetto in background mode on the device and return its PID.
 
