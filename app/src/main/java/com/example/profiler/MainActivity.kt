@@ -59,6 +59,8 @@ class MainActivity : ComponentActivity() {
         var latestMetrics by remember { mutableStateOf<JSONObject?>(null) }
         var latestMeminfo by remember { mutableStateOf<JSONObject?>(null) }
         var meminfoError by remember { mutableStateOf<String?>(null) }
+        var latestBattery by remember { mutableStateOf<JSONObject?>(null) }
+        var batteryError by remember { mutableStateOf<String?>(null) }
         var resultCsv by rememberSaveable { mutableStateOf<String?>(null) }
         val result = remember(resultCsv) { resultCsv?.let(::readCpuSummary) }
         var submittedTarget by rememberSaveable { mutableStateOf("") }
@@ -127,6 +129,12 @@ class MainActivity : ComponentActivity() {
                                 Api.request("/sessions/$id/meminfo")
                             } catch (e: CancellationException) { throw e }
                             catch (e: Exception) { meminfoError = e.message ?: "Meminfo request failed"; null }
+                            // Raw dumpsys battery / batterystats snapshots; parsed on the phone by EnergyCard.
+                            // A failure here only affects the energy card.
+                            latestBattery = try {
+                                Api.request("/sessions/$id/battery")
+                            } catch (e: CancellationException) { throw e }
+                            catch (e: Exception) { batteryError = e.message ?: "Battery request failed"; null }
                             latestMetrics = metrics
                             resultCsv = csv
                             "Complete"
@@ -182,6 +190,7 @@ class MainActivity : ComponentActivity() {
                 val requestedWorkload = workload
                 starting = true; status = "Starting"; errorMessage = null; resultCsv = null
                 latestMetrics = null; latestMeminfo = null; meminfoError = null
+                latestBattery = null; batteryError = null
                 stopRequested = false; recordingStartedAt = null; recordingSeconds = 0
                 scope.launch {
                     try {
@@ -248,6 +257,12 @@ class MainActivity : ComponentActivity() {
                     bounds = remember(metrics) { readMetricTable(metrics, "trace_bounds") },
                     meminfo = latestMeminfo,
                     meminfoError = meminfoError,
+                    spanNs = spanNs,
+                )
+                EnergyCard(
+                    table = remember(metrics) { readMetricTable(metrics, "battery") },
+                    battery = latestBattery,
+                    batteryError = batteryError,
                     spanNs = spanNs,
                 )
                 CpuDetails(remember(metrics) { readMetricTable(metrics, "cpu_details") })
